@@ -32,10 +32,10 @@ jobs:
       - name: Install Dependencies
         run: pip install DrissionPage requests
 
-      # 5. 运行续期脚本
+      # 5. 运行续期脚本 (关键步骤)
       - name: Run Renew Script
         env:
-          # ⚠️ 这里将 GitHub Secrets 传递给 Python 脚本
+          # 传递 GitHub Secrets 到环境变量
           KB_EMAIL: ${{ secrets.KB_EMAIL }}
           KB_PASSWORD: ${{ secrets.KB_PASSWORD }}
           KB_RENEW_URL: ${{ secrets.KB_RENEW_URL }}
@@ -44,12 +44,14 @@ jobs:
           export DISPLAY=:99
           sudo Xvfb -ac :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
           
-          # 运行脚本
-          python main.py
+          # ⚠️ 关键修改：加上 -u 参数
+          # -u (unbuffered) 强制 Python 实时输出日志，不缓存
+          # 这样你在 GitHub Actions 网页上就能一行一行看着它跑，不用干等
+          python -u main.py
 
-      # 6. 失败时上传截图 (方便调试)
+      # 6. 失败时上传截图 (虽然新版脚本不太依赖截图了，留着备用)
       - name: Upload Debug Screenshots
-        if: failure() # 只有运行失败时才执行
+        if: failure() 
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots
