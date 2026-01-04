@@ -4,7 +4,7 @@ import requests
 import zipfile
 import io
 import datetime
-import shutil
+import re
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 # ==================== 基础工具 ====================
@@ -12,66 +12,99 @@ def log(message):
     current_time = datetime.datetime.now().strftime("%H:%M:%S")
     print(f"[{current_time}] {message}", flush=True)
 
-def download_cf_autoclicker():
+def download_and_locate_extension():
     """
-    【修正】下载 cf-autoclick 插件
-    使用您提供的 master 分支链接
+    【智能寻址】下载插件并找到 manifest.json 的真实路径
+    完美解决 'cf-autoclick-master/cf-autoclick-master' 这种多层嵌套问题
     """
-    # 插件解压后的预期文件夹名
-    expected_folder_name = "cf-autoclick-master"
     extract_root = "extensions"
-    final_path = os.path.abspath(os.path.join(extract_root, expected_folder_name))
     
-    # 如果已经下载并解压过，直接返回
-    if os.path.exists(final_path):
-        log(">>> [插件] cf-autoclick 已就绪")
-        return final_path
-        
-    log(">>> [插件] 正在下载 cf-autoclick (Master分支)...")
-    try:
-        # 您提供的正确链接
-        url = "https://codeload.github.com/tenacious6/cf-autoclick/zip/refs/heads/master"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, stream=True)
-        
-        if resp.status_code == 200:
-            if not os.path.exists(extract_root): os.makedirs(extract_root)
+    # 1. 只有当文件夹不存在时才下载，避免重复下载
+    if not os.path.exists(extract_root):
+        log(">>> [插件] 正在下载 cf-autoclick (Master)...")
+        try:
+            url = "https://codeload.github.com/tenacious6/cf-autoclick/zip/refs/heads/master"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            resp = requests.get(url, headers=headers, stream=True)
+            if resp.status_code == 200:
+                with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+                    zf.extractall(extract_root)
+                log(">>> [插件] 解压完成")
+            else:
+                log(f"❌ [插件] 下载失败: {resp.status_code}")
+                return None
+        except Exception as e:
+            log(f"❌ [插件] 异常: {e}")
+            return None
+
+    # 2. 【核心】遍历所有子目录，寻找 manifest.json
+    # 无论它藏在第几层目录（例如 cf-autoclick-master/cf-autoclick-master），都能挖出来
+    log(">>> [系统] 正在扫描 manifest.json 路径...")
+    for root, dirs, files in os.walk(extract_root):
+        if "manifest.json" in files:
+            log(f"✅ [系统] 锁定插件真实路径: {root}")
+            return os.path.abspath(root)
             
-            # 解压
-            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-                zf.extractall(extract_root)
-                
-            log(f">>> [插件] 下载并解压完成: {final_path}")
-            return final_path
-        else:
-            log(f"❌ [插件] 下载失败，状态码: {resp.status_code}")
-            log(f"   链接: {url}")
-    except Exception as e:
-        log(f"❌ [插件] 安装异常: {e}")
-    
+    log("❌ [系统] 找遍了也没找到 manifest.json，插件文件可能损坏")
     return None
 
 # ==================== 核心逻辑 ====================
 
 def pass_full_page_shield(page):
-    """处理全屏盾 (等待插件)"""
-    for _ in range(5):
+    """处理全屏盾"""
+    for _ in range(3):
         if "just a moment" in page.title.lower():
-            log("--- [门神] 全屏盾出现，等待插件自动突破...")
-            time.sleep(2)
+            log("--- [门神] 等待插件通过全屏盾...")
+            time.sleep(3)
         else:
             return True
     return False
 
-def analyze_page_result(page):
+def manual_click_checkbox(modal):
+    """
+    【双重保险】
+    插件失效时的兜底方案：手动点 checkbox
+    """
+    log(">>> [补刀] 检查是否需要手动点击 Checkbox...")
+    
+    # 1. 进 iframe 找
+    iframe = modal.ele('css:iframe[src*="cloudflare"], iframe[src*="turnstile"]', timeout=3)
+    if iframe:
+        # 很多时候 checkbox 是 hidden 的，但我们尝试找一下
+        checkbox = iframe.ele('css:input[type="checkbox"]', timeout=2)
+        if checkbox:
+            log(">>> [补刀] 🎯 在 iframe 里点击 Checkbox！")
+            # 强制 JS 点击，无视遮挡
+            checkbox.click(by_js=True)
+            return True
+        else:
+            # 如果找不到 checkbox，就点 iframe 身体中心
+            log(">>> [补刀] 点击 iframe 主体...")
+            iframe.ele('tag:body').click(by_js=True)
+            return True
+            
+    # 2. 在外部找
+    checkbox = modal.ele('css:input[type="checkbox"]', timeout=1)
+    if checkbox:
+        log(">>> [补刀] 🎯 在外部点击 Checkbox！")
+        checkbox.click(by_js=True)
+        return True
+        
+    log(">>> [补刀] 未找到可点击元素 (可能插件已经处理完毕)")
+    return False
+
+def analyze_page_alert(page):
     """解析结果"""
-    log(">>> [系统] 检查页面提示...")
+    log(">>> [系统] 检查结果...")
     
     danger = page.ele('css:.alert.alert-danger')
     if danger and danger.states.is_displayed:
         text = danger.text
         log(f"⬇️ 红色提示: {text}")
         if "can't renew" in text.lower():
+            match = re.search(r'\(in (\d+) day', text)
+            days = match.group(1) if match else "?"
+            log(f"✅ [结果] 未到期 (等待 {days} 天)")
             return "SUCCESS_TOO_EARLY"
         elif "captcha" in text.lower():
             return "FAIL_CAPTCHA"
@@ -87,22 +120,22 @@ def analyze_page_result(page):
 
 # ==================== 主程序 ====================
 def job():
-    # 1. 下载插件 (使用修正后的链接)
-    ext_path = download_cf_autoclicker()
+    # 1. 智能加载插件
+    ext_path = download_and_locate_extension()
     
     co = ChromiumOptions()
-    co.set_argument('--headless=new') 
+    co.set_argument('--headless=new')
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-gpu')
     co.set_argument('--disable-dev-shm-usage')
     co.set_argument('--window-size=1920,1080')
     co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
     
-    # 2. 挂载插件
     if ext_path: 
         co.add_extension(ext_path)
+        log(f">>> [浏览器] 已挂载插件，路径: {os.path.basename(ext_path)}")
     else:
-        log("⚠️ 警告: 插件下载失败，脚本将尝试裸奔 (成功率低)！")
+        log("⚠️ [浏览器] 插件加载失败，将尝试纯脚本模式")
         
     co.auto_port()
     page = ChromiumPage(co)
@@ -128,7 +161,7 @@ def job():
             page.ele('css:button#submit').click()
             page.wait.url_change('login', exclude=True, timeout=20)
         
-        # Step 2: 续期循环
+        # Step 2: 循环重试
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             log(f"\n🚀 [Step 2] 尝试续期 (第 {attempt} 次)...")
@@ -149,16 +182,19 @@ def job():
                 modal = page.ele('css:.modal-content', timeout=10)
                 
                 if modal:
-                    # ==========================================
-                    # 插件时刻
-                    # ==========================================
-                    log(">>> [插件] 弹窗已出，等待插件自动过盾 (10s)...")
+                    log(">>> [操作] 弹窗出现，等待插件自动验证 (10s)...")
                     
-                    # 确保 iframe 出现，给插件操作的机会
-                    page.wait.ele_displayed('css:iframe[src*="cloudflare"], iframe[src*="turnstile"]', timeout=10)
+                    # 确保验证码框架已加载
+                    page.wait.ele_displayed('css:iframe[src*="cloudflare"], iframe[src*="turnstile"]', timeout=8)
                     
-                    # 纯等待，让插件去点
+                    # 1. 插件表演时间
                     time.sleep(10)
+                    
+                    # 2. 补刀时间 (如果插件没搞定，脚本手动点)
+                    manual_click_checkbox(modal)
+                    
+                    # 3. 缓冲时间
+                    time.sleep(3)
                     
                     confirm_btn = modal.ele('css:button[type="submit"].btn-primary')
                     if confirm_btn:
@@ -167,13 +203,13 @@ def job():
                         log(">>> 等待响应 (5s)...")
                         time.sleep(5)
                         
-                        result = analyze_page_result(page)
+                        result = analyze_page_alert(page)
                         
                         if result == "SUCCESS" or result == "SUCCESS_TOO_EARLY":
                             break 
                         
                         if result == "FAIL_CAPTCHA":
-                            log("⚠️ 插件操作未完成，刷新重试...")
+                            log("⚠️ 验证失败，准备重试...")
                             time.sleep(2)
                             continue
                     else:
@@ -181,8 +217,8 @@ def job():
                 else:
                     log("❌ 弹窗未出")
             else:
-                log("⚠️ 未找到按钮，检查是否已续期...")
-                result = analyze_page_result(page)
+                log("⚠️ 未找到按钮，检查状态...")
+                result = analyze_page_alert(page)
                 if result == "SUCCESS_TOO_EARLY":
                     break
             
@@ -198,3 +234,4 @@ def job():
 
 if __name__ == "__main__":
     job()
+
