@@ -42,12 +42,11 @@ def download_and_extract_silk_extension():
 def handle_captcha(context_ele, name=""):
     """
     通用验证码处理器
-    【修正】只点击真正显示的 iframe，防止对着空气点
     """
     # 优先找 Cloudflare 验证码 iframe
-    iframe = context_ele.ele('css:iframe[src*="cloudflare"]')
+    iframe = context_ele.ele('css:iframe[src*="cloudflare"]', timeout=2)
     if not iframe:
-        iframe = context_ele.ele('css:iframe[title*="Widget"]')
+        iframe = context_ele.ele('css:iframe[title*="Widget"]', timeout=2)
         
     # 关键修改：必须是可见的 (displayed) 才点
     if iframe and iframe.states.is_displayed:
@@ -60,51 +59,46 @@ def handle_captcha(context_ele, name=""):
         except Exception as e:
             log(f"⚠️ [{name}盾] 点击异常: {e}")
     else:
-        # 如果找不到可见的 iframe，说明所谓的拦截可能是误判
         pass
         
     return False
 
-def ensure_page_ready(page):
+def ensure_page_ready(page, target_selector):
     """
-    【死循环破局版】确保真正进入了 Dashboard
+    【通用门神】确保真正进入了页面
+    target_selector: 成功的标志 (比如登录页是 input，服务器页是 button)
     """
-    log("--- [门神] 检查当前页面状态...")
+    log(f"--- [门神] 正在检查页面 (目标: {target_selector})...")
     
-    for i in range(1, 10): 
-        # 1. 如果能直接找到 Renew 按钮，说明已经进来了，直接放行！
-        # 不要管 html 里有没有 captcha 字样，那是误报
-        if page.ele('css:button:contains("Renew")'):
-            log("--- [门神] 发现 Renew 按钮，通过！")
+    for i in range(1, 15): 
+        # 1. 检查目标元素是否存在 (快速检查，2秒超时)
+        if page.ele(target_selector, timeout=2):
+            log(f"--- [门神] 发现目标元素，通过！")
             return True
 
         title = page.title.lower()
         
         # 2. 显式拦截：标题是 Just a moment
         if "just a moment" in title or "attention" in title:
-            log(f"--- [拦截] 全屏盾阻挡 ({i}/10)，尝试点击...")
+            log(f"--- [拦截] 全屏盾阻挡 ({i}/15)，尝试点击...")
             if not handle_captcha(page, "全屏"):
-                # 如果没找到验证码却被拦住了，可能是卡了，刷新
                 log("--- [操作] 没找到验证码但被拦截，刷新页面...")
                 page.refresh()
                 time.sleep(5)
             continue
             
-        # 3. 隐式拦截：标题正常，但找不到按钮，且有验证码 iframe
-        # 只有当 iframe 真实存在且可见时，才认为是拦截
-        iframe = page.ele('css:iframe[src*="cloudflare"]')
+        # 3. 隐式拦截：标题正常，但找不到目标，且有验证码 iframe
+        iframe = page.ele('css:iframe[src*="cloudflare"]', timeout=2)
         if iframe and iframe.states.is_displayed:
-             log(f"--- [拦截] 发现页面中有残留验证码 ({i}/10)，清理中...")
+             log(f"--- [拦截] 发现页面中有残留验证码 ({i}/15)，清理中...")
              handle_captcha(page, "残留")
              time.sleep(3)
         else:
-            # 标题正常，也没验证码 iframe，那可能只是还没加载出来 Renew 按钮
-            # 或者根本就没有拦截，只是 html 代码里有 captcha 这个词
-            log(f"--- [等待] 页面看似正常，寻找内容中... ({i}/10)")
+            log(f"--- [等待] 页面看似正常但未找到目标... ({i}/15)")
             
-            # 如果等了半天（比如第3次循环了）还是没按钮，刷新一下
-            if i % 3 == 0:
-                log("--- [操作] 页面卡顿，主动刷新...")
+            # 只有在多次尝试后才刷新，避免频繁刷新导致加载不出来
+            if i % 5 == 0:
+                log("--- [操作] 加载超时，主动刷新...")
                 page.refresh()
                 time.sleep(5)
             else:
@@ -126,8 +120,7 @@ def check_result(page):
     time.sleep(2)
     full_text = page.html.lower()
     
-    # 只有当验证码 iframe 真的存在时，才报验证码错误
-    iframe = page.ele('css:iframe[src*="cloudflare"]')
+    iframe = page.ele('css:iframe[src*="cloudflare"]', timeout=2)
     if iframe and iframe.states.is_displayed:
         log("❌ 结果: 验证码拦截")
         return "FAIL"
@@ -171,10 +164,10 @@ def job():
         log(">>> [Step 1] 登录...")
         page.get('https://dashboard.katabump.com/auth/login')
         
-        # 确保能看见登录框
-        ensure_page_ready(page)
+        # 【修正】登录页的目标是找到 email 输入框，而不是 Renew 按钮
+        ensure_page_ready(page, 'css:input[name="email"]')
         
-        if page.ele('css:input[name="email"]'):
+        if page.ele('css:input[name="email"]', timeout=5):
             log(">>> 输入账号密码...")
             page.ele('css:input[name="email"]').input(email)
             page.ele('css:input[name="password"]').input(password)
@@ -187,18 +180,15 @@ def job():
             try:
                 page.get(target_url)
                 
-                # 【关键逻辑】强力破门
-                # 如果 check_page_ready 返回 True，说明 Renew 按钮已经找到了，或者盾已经彻底没了
-                ensure_page_ready(page)
+                # 【修正】续期页的目标是找到 Renew 按钮
+                # 如果 check_page_ready 返回 True，说明按钮找到了
+                ensure_page_ready(page, 'css:button:contains("Renew")')
                 
                 # 寻找主按钮
-                renew_btn = page.ele('css:button:contains("Renew")')
+                renew_btn = page.ele('css:button:contains("Renew")', timeout=5)
                 if not renew_btn:
-                    log("⚠️ 无 Renew 按钮，可能已续期或页面未加载...")
+                    log("⚠️ 经过检查仍无 Renew 按钮，可能已续期...")
                     if check_result(page) == "SUCCESS": break
-                    
-                    # 只有真的找不到按钮，且不是成功状态，才重试
-                    log("⚠️ 页面异常，重试...")
                     continue
 
                 # 点击主按钮
@@ -216,7 +206,7 @@ def job():
                     handle_captcha(modal, "弹窗")
                     
                     # 再找确认按钮
-                    confirm = modal.ele('css:button.btn-primary')
+                    confirm = modal.ele('css:button.btn-primary', timeout=2)
                     if confirm:
                         log(">>> [弹窗] 点击最终确认！")
                         robust_click(confirm)
